@@ -1,0 +1,125 @@
+#!/bin/sh
+#################################################################################
+# Custom Lynis Tests : tests_custom
+# Script 1: Enhanced Password Aging & Shadow Account Audit (CUST-0001)
+# Script 2: Enhanced DNS Resolver Security & Redundancy Audit (CUST-0002)
+#################################################################################
+
+###############################################################
+# Test 1 : Enhanced Password Aging & Shadow Account Audit
+###############################################################
+Register --test-no CUST-0001 --weight M --network NO --category security --description "Comprehensive password aging policies and empty shadow password audit"
+
+if [ ${SKIPTEST} -eq 0 ]; then
+    Display --indent 2 --text "- Auditing Password Aging & Authentication Policy..."
+    LOGIN_FILE="/etc/login.defs"
+
+    if [ -f "${LOGIN_FILE}" ]; then
+        PASS_MAX=$(grep -E "^[[:space:]]*PASS_MAX_DAYS" "${LOGIN_FILE}" 2>/dev/null | awk '{print $2}')
+        PASS_MIN=$(grep -E "^[[:space:]]*PASS_MIN_DAYS" "${LOGIN_FILE}" 2>/dev/null | awk '{print $2}')
+        PASS_WARN=$(grep -E "^[[:space:]]*PASS_WARN_AGE" "${LOGIN_FILE}" 2>/dev/null | awk '{print $2}')
+
+        if [ -n "${PASS_MAX}" ] && [ "${PASS_MAX}" -le 90 ] 2>/dev/null; then
+            Display --indent 4 --text "Password Max Age (${PASS_MAX} days)" --result "${STATUS_OK}" --color GREEN
+        else
+            Display --indent 4 --text "Password Max Age (${PASS_MAX:-unset} days)" --result "${STATUS_WARNING}" --color RED
+            ReportWarning "CUST-0001" "PASS_MAX_DAYS exceeds 90 days or is unset in /etc/login.defs"
+        fi
+
+        if [ -n "${PASS_MIN}" ] && [ "${PASS_MIN}" -ge 1 ] 2>/dev/null; then
+            Display --indent 4 --text "Password Min Age (${PASS_MIN} days)" --result "${STATUS_OK}" --color GREEN
+        else
+            Display --indent 4 --text "Password Min Age (${PASS_MIN:-unset} days)" --result "${STATUS_WARNING}" --color RED
+            ReportWarning "CUST-0001" "PASS_MIN_DAYS is not enforced (should be >= 1 day to prevent immediate reuse)"
+        fi
+
+        if [ -n "${PASS_WARN}" ] && [ "${PASS_WARN}" -ge 7 ] 2>/dev/null; then
+            Display --indent 4 --text "Password Warning Window (${PASS_WARN} days)" --result "${STATUS_OK}" --color GREEN
+        else
+            Display --indent 4 --text "Password Warning Window (${PASS_WARN:-unset} days)" --result "${STATUS_SUGGESTION}" --color YELLOW
+            ReportSuggestion "CUST-0001" "Set PASS_WARN_AGE to at least 7 days in /etc/login.defs"
+        fi
+
+        if [ -r /etc/shadow ]; then
+            BLANK_USERS=$(awk -F: '($2 == "") {print $1}' /etc/shadow 2>/dev/null)
+            if [ -z "${BLANK_USERS}" ]; then
+                Display --indent 4 --text "Blank Password Shadow Audit" --result "${STATUS_OK}" --color GREEN
+            else
+                Display --indent 4 --text "Blank Password Shadow Audit" --result "${STATUS_WARNING}" --color RED
+                ReportWarning "CUST-0001" "Accounts with empty password fields found in /etc/shadow: ${BLANK_USERS}"
+            fi
+        else
+            LogText "Note: /etc/shadow not readable (run as root for complete shadow audit)"
+        fi
+
+        LogText "CUST-0001: Password policy and authentication inspection completed."
+    else
+        Display --indent 4 --text "Configuration File /etc/login.defs" --result "${STATUS_NOTFOUND}" --color RED
+        ReportWarning "CUST-0001" "Configuration file /etc/login.defs not found on host."
+    fi
+fi
+
+###############################################################
+# Test 2 : Enhanced DNS Resolver Security & Redundancy Audit
+###############################################################
+Register --test-no CUST-0002 --weight M --network YES --category security --description "Comprehensive DNS resolver configuration, stub analysis, and redundancy audit"
+
+if [ ${SKIPTEST} -eq 0 ]; then
+    Display --indent 2 --text "- Auditing DNS Configuration and Resolver Security..."
+    DNS_FILE="/etc/resolv.conf"
+
+    if [ -f "${DNS_FILE}" ]; then
+        if [ -L "${DNS_FILE}" ]; then
+            LINK_TARGET=$(readlink -f "${DNS_FILE}")
+            Display --indent 4 --text "Resolv.conf: Managed Symlink -> ${LINK_TARGET}" --result "${STATUS_OK}" --color GREEN
+            LogText "CUST-0002: /etc/resolv.conf links to ${LINK_TARGET}"
+        else
+            Display --indent 4 --text "Resolv.conf: Static File" --result "${STATUS_SUGGESTION}" --color YELLOW
+            ReportSuggestion "CUST-0002" "/etc/resolv.conf is a static file; verify network managers do not overwrite it"
+        fi
+
+        NS_LIST=$(grep -E "^[[:space:]]*nameserver" "${DNS_FILE}" 2>/dev/null | awk '{print $2}')
+        NS_COUNT=$(echo "${NS_LIST}" | grep -c -v "^$")
+
+        if [ "${NS_COUNT}" -eq 0 ]; then
+            Display --indent 4 --text "Configured Nameservers: None Found" --result "${STATUS_WARNING}" --color RED
+            ReportWarning "CUST-0002" "No active nameservers configured in /etc/resolv.conf"
+        else
+            if echo "${NS_LIST}" | grep -q "127.0.0.53"; then
+                Display --indent 4 --text "DNS Stub Resolver (127.0.0.53 detected)" --result "${STATUS_OK}" --color GREEN
+                LogText "CUST-0002: System is using local systemd-resolved caching stub."
+            fi
+
+            if [ "${NS_COUNT}" -lt 2 ] && ! echo "${NS_LIST}" | grep -q "127.0.0.53"; then
+                Display --indent 4 --text "Nameserver Redundancy (${NS_COUNT} server)" --result "${STATUS_SUGGESTION}" --color YELLOW
+                ReportSuggestion "CUST-0002" "Single upstream nameserver configured; add a secondary DNS server for fault tolerance"
+            else
+                Display --indent 4 --text "Nameserver Availability (${NS_COUNT} entry/entries)" --result "${STATUS_OK}" --color GREEN
+            fi
+        fi
+
+        DNS_OPTIONS=$(grep -E "^[[:space:]]*options" "${DNS_FILE}" 2>/dev/null)
+        if echo "${DNS_OPTIONS}" | grep -q "edns0"; then
+            Display --indent 4 --text "DNS Extension (edns0 active)" --result "${STATUS_OK}" --color GREEN
+        else
+            Display --indent 4 --text "DNS Extension (edns0 missing)" --result "${STATUS_SUGGESTION}" --color YELLOW
+            ReportSuggestion "CUST-0002" "Enable 'options edns0' in resolv.conf for larger DNS payloads and DNSSEC support"
+        fi
+
+        SEARCH_DOMAINS=$(grep -E "^[[:space:]]*search" "${DNS_FILE}" 2>/dev/null | awk '{$1=""; print $0}' | sed 's/^[ \t]*//')
+        if [ -n "${SEARCH_DOMAINS}" ]; then
+            DOMAIN_COUNT=$(echo "${SEARCH_DOMAINS}" | wc -w)
+            if [ "${DOMAIN_COUNT}" -gt 3 ]; then
+                Display --indent 4 --text "DNS Search Path (${DOMAIN_COUNT} domains)" --result "${STATUS_WARNING}" --color RED
+                ReportWarning "CUST-0002" "More than 3 search domains configured; risk of DNS query leakage and suffix hijacking"
+            else
+                Display --indent 4 --text "DNS Search Path (${SEARCH_DOMAINS})" --result "${STATUS_OK}" --color GREEN
+            fi
+        fi
+
+        LogText "CUST-0002: Completed DNS resolver audit."
+    else
+        Display --indent 4 --text "File ${DNS_FILE}" --result "${STATUS_NOTFOUND}" --color RED
+        ReportWarning "CUST-0002" "Resolver configuration file /etc/resolv.conf does not exist"
+    fi
+fi
